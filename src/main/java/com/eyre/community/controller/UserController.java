@@ -1,10 +1,11 @@
 package com.eyre.community.controller;
 
 import com.eyre.community.annotation.LoginRequired;
+import com.eyre.community.entity.Comment;
+import com.eyre.community.entity.DiscussPost;
+import com.eyre.community.entity.Page;
 import com.eyre.community.entity.User;
-import com.eyre.community.service.FollowService;
-import com.eyre.community.service.LikeService;
-import com.eyre.community.service.UserService;
+import com.eyre.community.service.*;
 import com.eyre.community.util.CommunityConstant;
 import com.eyre.community.util.CommunityUtil;
 import com.eyre.community.util.HostHolder;
@@ -20,11 +21,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.multipart.MultipartFile;
 
-import javax.servlet.http.HttpServletResponse;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Controller
@@ -53,6 +53,12 @@ public class UserController implements CommunityConstant {
     @Autowired
     private FollowService followService;
 
+    @Autowired
+    private DiscussPostService discussPostService;
+
+    @Autowired
+    private CommentService commentService;
+
     @LoginRequired
     @RequestMapping(path = "/setting", method = RequestMethod.GET)
     public String getSettingPage() {
@@ -76,46 +82,46 @@ public class UserController implements CommunityConstant {
 
         // 生成随机文件名
         fileName = CommunityUtil.generateUUID() + suffix;
-        // 确定文件存放的路径
-        File dest = new File(uploadPath + "/" + fileName);
+        logger.info("随机文件名：" + fileName);
+
         try {
-            // 存储文件
-            headerImage.transferTo(dest);
+            // 确定文件存放的路径
+            String filePath = CommunityUtil.upload(headerImage.getBytes(), fileName);
+
+            // 更新当前用户的头像的路径(web访问路径)
+            User user = hostHolder.getUser();
+            userService.updateHeader(user.getId(), filePath);
         } catch (IOException e) {
             logger.error("上传文件失败: " + e.getMessage());
             throw new RuntimeException("上传文件失败,服务器发生异常!", e);
         }
 
-        // 更新当前用户的头像的路径(web访问路径)
-        // http://localhost:8080/community/user/header/xxx.png
-        User user = hostHolder.getUser();
-        String headerUrl = domain + contextPath + "/user/header/" + fileName;
-        userService.updateHeader(user.getId(), headerUrl);
-
         return "redirect:/index";
     }
 
-    @RequestMapping(path = "/header/{fileName}", method = RequestMethod.GET)
-    public void getHeader(@PathVariable("fileName") String fileName, HttpServletResponse response) {
-        // 服务器存放路径
-        fileName = uploadPath + "/" + fileName;
-        // 文件后缀
-        String suffix = fileName.substring(fileName.lastIndexOf("."));
-        // 响应图片
-        response.setContentType("image/" + suffix);
-        try (
-                OutputStream os = response.getOutputStream();
-                FileInputStream fis = new FileInputStream(fileName);
-        ) {
-            byte[] buffer = new byte[1024];
-            int b = 0;
-            while ((b = fis.read(buffer)) != -1) {
-                os.write(buffer, 0, b);
-            }
-        } catch (IOException e) {
-            logger.error("读取头像失败: " + e.getMessage());
-        }
-    }
+    // 废弃
+    // 解析网络地址，读取本地存储头像
+//    @RequestMapping(path = "/header/{fileName}", method = RequestMethod.GET)
+//    public void getHeader(@PathVariable("fileName") String fileName, HttpServletResponse response) {
+//        // 服务器存放路径
+//        fileName = uploadPath + "/" + fileName;
+//        // 文件后缀
+//        String suffix = fileName.substring(fileName.lastIndexOf("."));
+//        // 响应图片
+//        response.setContentType("image/" + suffix);
+//        try (
+//                OutputStream os = response.getOutputStream();
+//                FileInputStream fis = new FileInputStream(fileName);
+//        ) {
+//            byte[] buffer = new byte[1024];
+//            int b = 0;
+//            while ((b = fis.read(buffer)) != -1) {
+//                os.write(buffer, 0, b);
+//            }
+//        } catch (IOException e) {
+//            logger.error("读取头像失败: " + e.getMessage());
+//        }
+//    }
 
     // 个人主页
     @RequestMapping(path = "/profile/{userId}", method = RequestMethod.GET)
@@ -145,5 +151,52 @@ public class UserController implements CommunityConstant {
         model.addAttribute("hasFollowed", hasFollowed);
 
         return "/site/profile";
+    }
+
+    @RequestMapping(path = "/posts/{userId}", method = RequestMethod.GET)
+    public String getPostPage(@PathVariable("userId") int userId, Page page, Model model) {
+        int postRows = discussPostService.findDiscussPostRows(userId);
+        model.addAttribute("postRows", postRows);
+
+        page.setLimit(5);
+        page.setRows(postRows);
+        page.setPath("/user/posts/" + userId);
+        List<DiscussPost> posts = discussPostService.findDiscussPosts(userId, page.getOffset(), page.getLimit(), 0);
+
+        List<Map<String, Object>> postVOlist = new ArrayList<>();
+        for (DiscussPost post : posts) {
+            Map<String, Object> postVO = new HashMap<>();
+            postVO.put("post", post);
+            long likeCount = likeService.findEntityLikeCount(ENTITY_TYPE_POST, post.getId());
+            postVO.put("likeCount", likeCount);
+
+            postVOlist.add(postVO);
+        }
+        model.addAttribute("posts", postVOlist);
+
+        return "/site/my-post";
+    }
+
+    @RequestMapping(path = "/comments/{userId}", method = RequestMethod.GET)
+    public String getCommentPage(@PathVariable("userId") int userId, Page page, Model model) {
+        int commentRows = commentService.findCommentCountByUser(userId);
+        model.addAttribute("commentRows", commentRows);
+
+        page.setLimit(5);
+        page.setRows(commentRows);
+        page.setPath("/user/comments/" + userId);
+        List<Comment> comments = commentService.findCommentsByUser(userId, page.getOffset(), page.getLimit());
+
+        List<Map<String, Object>> commentVOlist = new ArrayList<>();
+        for (Comment comment : comments) {
+            Map<String, Object> commentVO = new HashMap<>();
+            commentVO.put("comment", comment);
+            DiscussPost discussPost = discussPostService.findDiscussPostById(comment.getEntityId());
+            commentVO.put("title", discussPost.getTitle());
+            commentVOlist.add(commentVO);
+        }
+        model.addAttribute("comments", commentVOlist);
+
+        return "/site/my-reply";
     }
 }
